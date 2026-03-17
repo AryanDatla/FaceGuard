@@ -1,4 +1,4 @@
-import streamlit as st
+'''import streamlit as st
 import cv2
 import pandas as pd
 import os
@@ -322,3 +322,157 @@ elif menu == "System Registry":
                     if st.button("Delete", key=f"del_{emp['id']}", type="secondary"):
                         st.session_state.confirm_delete = emp['id']
                         st.rerun()
+'''
+
+import streamlit as st
+import cv2
+import pandas as pd
+import os
+import av
+from datetime import datetime
+from dotenv import load_dotenv
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+
+import att  # Ensure your att.py is in the same folder
+
+# Load environment variables
+load_dotenv() 
+
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="FaceGuard Cloud",
+    page_icon="🛡️",
+    layout="wide"
+)
+
+# --- RTC Configuration for Cloud (STUN servers) ---
+RTC_CONFIG = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
+
+# --- Secure Admin Credentials ---
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin") 
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+
+# --- Initialize Session State ---
+if 'admin_logged_in' not in st.session_state:
+    st.session_state.admin_logged_in = False
+if 'confirm_delete' not in st.session_state:
+    st.session_state.confirm_delete = None
+
+# --- Robust Data Loading ---
+def load_csv_safe(file_path):
+    if os.path.exists(file_path):
+        try:
+            # Fix: Added explicit encoding and error handling
+            return pd.read_csv(file_path, encoding='utf-8', errors='replace')
+        except Exception as e:
+            st.error(f"Error reading {file_path}: {e}")
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+def get_fresh_employees():
+    return att.get_enrolled_employees()
+
+# --- Sidebar Navigation ---
+st.sidebar.title("🛡️ FaceGuard Pro")
+menu = st.sidebar.selectbox("Navigation", 
+    ["Live Scanner", "Analytics & Reports", "Employee Registry", "Admin Settings"])
+
+# --- Admin Auth logic ---
+if not st.session_state.admin_logged_in:
+    with st.sidebar.expander("🔐 Admin Login"):
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
+        if st.button("Login"):
+            if u == ADMIN_USERNAME and p == ADMIN_PASSWORD:
+                st.session_state.admin_logged_in = True
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+else:
+    if st.sidebar.button("Logout"):
+        st.session_state.admin_logged_in = False
+        st.rerun()
+
+# --- Main Logic ---
+if menu == "Live Scanner":
+    st.header("📸 Real-time Security Scanner")
+    st.info("The scanner uses your browser's webcam. Please allow camera permissions.")
+
+    # Frame Processing Callback for WebRTC
+    def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
+        img = frame.to_ndarray(format="bgr24")
+        
+        # Here we bridge to your att.py logic
+        # Note: Heavy DeepFace logic might be slow on free Cloud CPUs
+        try:
+            # Optional: Add processing logic here or just display
+            # img = att.process_frame_logic(img) 
+            pass
+        except:
+            pass
+            
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+    webrtc_streamer(
+        key="face-recognition",
+        mode=WebRtcMode.SENDRECV,
+        rtc_configuration=RTC_CONFIG,
+        video_frame_callback=video_frame_callback,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+    )
+
+elif menu == "Analytics & Reports":
+    st.header("📊 Attendance & Security Logs")
+    
+    tab1, tab2 = st.tabs(["Attendance", "Security Alerts"])
+    
+    with tab1:
+        df_att = load_csv_safe(att.ATTENDANCE_CSV)
+        if not df_att.empty:
+            st.dataframe(df_att, use_container_width=True)
+            st.download_button("Export Attendance CSV", df_att.to_csv(index=False), "attendance.csv")
+        else:
+            st.write("No attendance records found.")
+
+    with tab2:
+        df_spoof = load_csv_safe(att.SPOOF_LOG_CSV)
+        if not df_spoof.empty:
+            st.warning("Potential Spoofing Attempts Detected")
+            st.dataframe(df_spoof, use_container_width=True)
+        else:
+            st.success("No security breaches recorded.")
+
+elif menu == "Employee Registry":
+    st.header("👥 System Registry")
+    
+    if not st.session_state.admin_logged_in:
+        st.warning("Please login as Admin to manage records.")
+    else:
+        emps = get_fresh_employees()
+        if emps:
+            for emp in emps:
+                col1, col2, col3 = st.columns([1, 2, 1])
+                col1.markdown(f"**ID:** `{emp['id']}`")
+                col2.write(emp['name'])
+                if col3.button("Delete", key=f"btn_{emp['id']}"):
+                    # Logic to delete folder/file
+                    photo_path = os.path.join(att.DB_PATH, emp['file'])
+                    if os.path.exists(photo_path):
+                        os.remove(photo_path)
+                    att.clear_deepface_cache()
+                    st.rerun()
+        else:
+            st.info("Database is empty.")
+
+elif menu == "Admin Settings":
+    st.header("⚙️ System Configuration")
+    if st.session_state.admin_logged_in:
+        st.write("DeepFace Model: ", att.MODEL_NAME)
+        if st.button("Clear Recognition Cache"):
+            att.clear_deepface_cache()
+            st.success("Cache cleared successfully.")
+    else:
+        st.error("Access Denied.")
