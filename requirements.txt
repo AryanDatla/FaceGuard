@@ -5,3 +5,4 @@ deepface
 python-dotenv
 pyttsx3
 tf-keras
+streamlit-webrtc
