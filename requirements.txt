@@ -1,4 +1,4 @@
-opencv-python-headless
+opencv-python
 streamlit
 pandas
 deepface
