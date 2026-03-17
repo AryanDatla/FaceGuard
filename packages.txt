@@ -1,10 +1,2 @@
 libgl1
 libglib2.0-0
-opencv-python-headless
-streamlit
-pandas
-deepface
-python-dotenv
-pyttsx3
-tf-keras
-streamlit-webrtc
