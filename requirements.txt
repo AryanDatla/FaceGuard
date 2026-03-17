@@ -1,0 +1,7 @@
+opencv-python-headless
+streamlit
+pandas
+deepface
+python-dotenv
+pyttsx3
+tf-keras
