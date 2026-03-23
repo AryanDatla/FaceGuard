@@ -481,28 +481,39 @@ def clear_deepface_cache():
         print(f"  Removed stale cache: {pkl}")
 
 def parse_employee_from_path(img_path: str):
-    '''retrieve name of employee from the stored image path'''
+    '''retrieve name and id of employee from the stored image path'''
 
     fname = os.path.basename(img_path)
     stem = os.path.splitext(fname)[0]
-    parts = stem.split("_", 1)
+    parts = stem.split("_")
+
     emp_id = parts[0]
-    name = parts[1].replace("_", " ") if len(parts) > 1 else stem
+
+    if len(parts) > 2 and parts[-1].isdigit():
+        name = "_".join(parts[1:-1])
+
+    elif len(parts) > 1:
+        name = "_".join(parts[1:])
+        
+    else:
+        name = stem
+
     return emp_id, name
 
 def get_enrolled_employees():
-    '''retrieve employee names from the stored image paths'''
+    '''retrieve unique employees from the stored image paths'''
 
-    employees = []
+    seen = {}
     if not os.path.isdir(DB_PATH):
-        return employees
+        return []
 
     for fname in os.listdir(DB_PATH):
         if fname.lower().endswith((".jpg", ".jpeg", ".png")):
             emp_id, name = parse_employee_from_path(fname)
-            employees.append({"id": emp_id, "name": name, "file": fname})
-    
-    return employees
+            if emp_id not in seen:
+                seen[emp_id] = {"id": emp_id, "name": name, "file": fname}
+
+    return list(seen.values())
 
 # ── Status bar ────────────────────────────────────────────────────────
 
@@ -1002,74 +1013,61 @@ def enroll_employee():
         print("  ID and Name cannot be empty.")
         return
 
-    # ID / name duplicate check
     for emp in get_enrolled_employees():
         if emp["id"].lower() == emp_id.lower():
-            print(f"  Employee ID '{emp_id}' already enrolled as '{emp['name'].replace('_', ' ')}'. Aborting.")
+            print(f"  Employee ID '{emp_id}' already enrolled. Aborting.")
             return
-        
         if emp["name"].lower() == name.lower():
-            print(f"  Name '{name.replace('_', ' ')}' already enrolled with ID '{emp['id']}'. Aborting.")
+            print(f"  Name '{name}' already enrolled. Aborting.")
             return
 
-    print("\n  How do you want to enroll?")
-    print("  [1] Take a webcam snapshot")
-    print("  [2] Provide a local image path")
-    choice = input("  Choice (1/2): ").strip()
-
-    # Capture to a temp file OUTSIDE DB_PATH for a clean 1:N search
+    # Use a temp path for the first photo — duplicate check only
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
     os.close(tmp_fd)
-    captured = False
 
-    if choice == "1":
-        _enroll_from_webcam(tmp_path, name)
-        captured = os.path.isfile(tmp_path) and os.path.getsize(tmp_path) > 0
-        print(f"  [debug] temp path: {tmp_path}  captured: {captured}  size: {os.path.getsize(tmp_path) if os.path.isfile(tmp_path) else 0}")
-    
-    elif choice == "2":
-        src_input = input("  Enter full image path: ").strip().strip('"').strip("'")
-        if os.path.isfile(src_input):
-            shutil.copy(src_input, tmp_path)
-            captured = True
-        else:
-            print(f"  File not found: {src_input}")
-    
-    else:
-        print("  Invalid choice.")
+    captured_paths = _enroll_from_webcam(tmp_path, name, emp_id)
 
-    if not captured:
+    if not captured_paths:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+        print("  No photos captured. Enrollment cancelled.")
         return
 
-    # 1:N face duplicate search
-    print("  Running 1:N face search against enrolled database...")
-    is_dup, dup_id, dup_name, dist = _is_face_duplicate_1n(tmp_path)
+    # Duplicate check on first photo only
+    print("  Running duplicate check on first photo...")
+    is_dup, dup_id, dup_name, dist = _is_face_duplicate_1n(captured_paths[0])
 
     if is_dup:
-        os.remove(tmp_path)
-        print(f"  Duplicate face detected (distance: {dist:.4f}) — already enrolled as '{dup_name.replace('_', ' ')}' ({dup_id}). Aborting.")
+        for p in captured_paths:
+            if os.path.exists(p):
+                os.remove(p)
+        print(f"  Duplicate detected — already enrolled as '{dup_name}' ({dup_id}). Aborting.")
         return
 
-    # Move from temp to permanent DB_PATH
-    dest_path = os.path.join(DB_PATH, f"{emp_id}_{name}.jpg")
-    shutil.move(tmp_path, dest_path)
-    print(f"  Enrolled: {name.replace('_', ' ')} ({emp_id}) -> {dest_path}")
+    # Move all captured photos to DB_PATH
+    for i, src in enumerate(captured_paths):
+        dest = os.path.join(DB_PATH, f"{emp_id}_{name}_{i + 1}.jpg")
+        shutil.move(src, dest)
+        print(f"  Saved -> {dest}")
+
     clear_deepface_cache()
+    print(f"  Enrolled: {name.replace('_', ' ')} ({emp_id}) — {len(captured_paths)} photos")
 
 
-def _enroll_from_webcam(dest_path: str, name: str):
-    '''function to enroll directly through webcam'''
+def _enroll_from_webcam(dest_path: str, name: str, emp_id: str, num_photos: int = 5):
+    '''Capture multiple photos for enrollment'''
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("  Cannot open webcam.")
-        return
+        return []
 
-    print("  Press SPACE to capture  |  ESC to cancel")
+    print(f"  Capturing {num_photos} photos. Press SPACE to capture | ESC to cancel")
 
-    while True:
+    captured_paths = []
+    photo_num = 0
+
+    while photo_num < num_photos:
         ret, frame = cap.read()
         if not ret:
             break
@@ -1083,6 +1081,7 @@ def _enroll_from_webcam(dest_path: str, name: str):
             cv2.rectangle(display, (x, y), (x + w, y + h), (0, 220, 90), 2)
 
         color = (0, 220, 90) if len(faces) == 1 else (0, 140, 255)
+
         cv2.putText(
             display,
             f"Enrolling: {name.replace('_', ' ')}",
@@ -1095,14 +1094,14 @@ def _enroll_from_webcam(dest_path: str, name: str):
 
         cv2.putText(
             display,
-            f"Faces detected: {len(faces)}",
+            f"Photo {photo_num + 1}/{num_photos} : try a different angle",
             (10, 56),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             color,
             2
         )
-        
+
         cv2.putText(
             display,
             "SPACE=capture  ESC=cancel",
@@ -1116,25 +1115,42 @@ def _enroll_from_webcam(dest_path: str, name: str):
         cv2.imshow("Enroll Employee", display)
 
         key = cv2.waitKey(1) & 0xFF
-        if key == 27: #press esc to cancle
+        if key == 27:
             print("  Enrollment cancelled.")
             break
 
-        if key == 32: #press spacebar to capture
+        if key == 32:
             if len(faces) == 0:
                 print("  No face detected — move closer or improve lighting.")
                 continue
-            
             if len(faces) > 1:
                 print("  Multiple faces — ensure only one person is visible.")
                 continue
 
-            cv2.imwrite(dest_path, frame)
-            print(f"  Photo saved -> {dest_path}")
-            break
+            # Build path: empid_empname_N.jpg
+            base = os.path.splitext(dest_path)[0]
+            photo_path = f"{base}_{photo_num + 1}.jpg"
+            cv2.imwrite(photo_path, frame)
+            captured_paths.append(photo_path)
+            print(f"  Photo {photo_num + 1}/{num_photos} saved -> {photo_path}")
+            photo_num += 1
+
+            if photo_num < num_photos:
+                
+                for i in range(60):
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    frame = cv2.flip(frame, 1)
+                    cv2.putText(frame,
+                                f"Good! Adjust pose for photo {photo_num + 1}/{num_photos}",
+                                (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 90), 2)
+                    cv2.imshow("Enroll Employee", frame)
+                    cv2.waitKey(1)
 
     cap.release()
     cv2.destroyAllWindows()
+    return captured_paths
 
 
 # ── Reports ───────────────────────────────────────────────────────────────────
