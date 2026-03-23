@@ -181,7 +181,32 @@ elif menu == "Employee Enrollment":
             temp_path = os.path.join(tempfile.gettempdir(), f"temp_{e_id}.jpg")
 
             if mode == "Webcam Capture":
-                att._enroll_from_webcam(temp_path, e_name)
+                temp_path = os.path.join(tempfile.gettempdir(), f"temp_{e_id}.jpg")
+                captured_paths = att._enroll_from_webcam(temp_path, e_name, e_id)
+
+                if not captured_paths:
+                    st.warning("No photos captured. Enrollment cancelled.")
+                    st.stop()
+
+                # Duplicate check on first photo only
+                with st.spinner("Checking for duplicates..."):
+                    is_dup, d_id, d_name, dist = att._is_face_duplicate_1n(captured_paths[0])
+
+                if is_dup:
+                    for p in captured_paths:
+                        if os.path.exists(p):
+                            os.remove(p)
+                    st.error(f"❌ REJECTED: Already enrolled as **{d_name}** (ID: `{d_id}`)")
+                    st.stop()
+                
+                # Save all photos to DB_PATH
+                for i, src in enumerate(captured_paths):
+                    dest = os.path.join(att.DB_PATH, f"{e_id}_{e_name.replace(' ', '_')}_{i + 1}.jpg")
+                    shutil.move(src, dest)
+
+                att.clear_deepface_cache()
+                st.success(f"✅ Enrolled **{e_name}** with {len(captured_paths)} photos")
+                st.rerun()
 
             elif mode == "Upload Image":
                 if uploaded_file is None:
