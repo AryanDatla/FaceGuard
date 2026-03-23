@@ -34,8 +34,19 @@ SPOOF_FAKE_MIN_CON = 0.40
 SPOOF_LBP_THRESHOLD = 40.0
 SPOOF_FREQ_THRESHOLD = 8.0
 SPOOF_LOG_CSV = "spoof_log.csv"
-# ──────────────────────────────────────────────────────────────────────────────
 
+# ──────────Face Detector Config──────────────────────────────────────────────────
+_face_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+if _face_cascade.empty():
+    raise RuntimeError("Failed to load frontal face cascade - check OpenCv intallation")
+
+_profile_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_profileface.xml")
+if _profile_cascade.empty():
+    raise RuntimeError("Failes to load profile face cascade - check OpenCv intallation")
+
+#────────────────────────────────────────────────────────────────────────────────
 os.makedirs(DB_PATH, exist_ok=True)
 os.makedirs(INTRUDER_DIR, exist_ok=True)
 last_seen: dict = {}
@@ -89,7 +100,7 @@ def _fft_frequency_score(gray_face: np.ndarray) -> float:
     y_idx, x_idx = np.ogrid[:h, :w]
 
     low_mask = (y_idx - cy)**2 + (x_idx - cx)**2 <= radius**2
-    low_energy  = float(magnitude[low_mask].sum())
+    low_energy = float(magnitude[low_mask].sum())
     total_energy = float(magnitude.sum()) + 1e-6
     high_ratio = (total_energy - low_energy) / total_energy * 100.0
 
@@ -145,32 +156,14 @@ def _check_face_geometry(color_crop: np.ndarray) -> tuple[bool, str]:
     return True, f"geometry OK (ratio={ratio:.2f}, symmetry={symmetry_score:.2f})"
 
 
-# def _extract_face_roi(frame: np.ndarray):
-#     """Return (gray_face, color_face, (x,y,w,h)) of the largest face, or None."""
-#     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-#     face_cascade = cv2.CascadeClassifier(
-#         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-#     )
-#     faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(80, 80))
-#     if len(faces) == 0:
-#         return None
-#     x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-#     return gray[y:y+h, x:x+w], frame[y:y+h, x:x+w], (x, y, w, h)
-
-
 def _deepface_antispoof(face_crop: np.ndarray) -> tuple[bool, float]:
     """
     Run DeepFace anti-spoofing on cropped captured frame, cropping first prevents DeepFace from detecting a face in background
     """
 
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
-    os.close(tmp_fd)
-
     try:
-        cv2.imwrite(tmp_path, face_crop)
-
         faces = DeepFace.extract_faces(
-            img_path=tmp_path,
+            img_path=face_crop,
             anti_spoofing=True,
             enforce_detection=False,
             detector_backend="skip",
@@ -178,7 +171,7 @@ def _deepface_antispoof(face_crop: np.ndarray) -> tuple[bool, float]:
 
         if faces:
             face = faces[0]
-            is_real   = face.get("is_real", None)
+            is_real = face.get("is_real", None)
             confidence = float(face.get("antispoof_score", 0.0))
 
             if is_real is not None:
@@ -187,13 +180,7 @@ def _deepface_antispoof(face_crop: np.ndarray) -> tuple[bool, float]:
     
     except Exception as e:
         print(f"  [AntiSpoof-DeepFace error] {e}")
-    
-    finally:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-    
+
     return None, 0.0
 
 
@@ -230,20 +217,20 @@ def check_liveness_passive(color_crop: np.ndarray, gray_crop: np.ndarray) -> dic
     print(f"  [AntiSpoof] Geometry: {geo_reason}")
 
     if not geo_ok:
-        result["live"]   = False
+        result["live"] = False
         result["method"] = "geometry"
         result["reason"] = f"Spoof (geometry): {geo_reason}"
         return result
 
     # Texture scores computed for logging/display
     lbp_score = _lbp_texture_score(gray_crop)
-    fft_score  = _fft_frequency_score(gray_crop)
+    fft_score = _fft_frequency_score(gray_crop)
 
     result["lbp"] = lbp_score
     result["fft"] = fft_score
 
     lbp_pass = lbp_score >= SPOOF_LBP_THRESHOLD
-    fft_pass  = fft_score  >= SPOOF_FREQ_THRESHOLD
+    fft_pass = fft_score  >= SPOOF_FREQ_THRESHOLD
 
     print(f"  [AntiSpoof] LBP={lbp_score:.1f}({'✓' if lbp_pass else '✗'})  "
           f"FFT={fft_score:.1f}({'✓' if fft_pass else '✗'})")
@@ -263,34 +250,37 @@ def check_liveness_passive(color_crop: np.ndarray, gray_crop: np.ndarray) -> dic
 
         if df_real:
             # Model outputs REAL — block if confidence is high enough to trust a SPOOF reversal
-            result["live"]   = True
+            result["live"] = True
             result["reason"] = (
                 f"REAL — DeepFace(conf={df_conf:.2f})  "
                 f"LBP={lbp_score:.1f}  FFT={fft_score:.1f}"
             )
         
         else:
-            # Model outputs SPOOF — block if confidence clears the fake threshold
-            
+            # Model outputs SPOOF
             confident_spoof = df_conf >= SPOOF_FAKE_MIN_CON
-            result["live"]   = not confident_spoof
 
             if confident_spoof:
+                result["live"] = False
                 result["reason"] = f"Spoof: DeepFace=SPOOF (conf={df_conf:.2f})"
 
             else:
-                result["live"]   = True
+                # Uncertain — fall back to texture + frequency
+                result["live"] = lbp_pass and fft_pass
+                result["method"] = "deepface+texture"
                 result["reason"] = (
-                    f"Uncertain — DeepFace low-conf spoof ({df_conf:.2f}<{SPOOF_FAKE_MIN_CON}), "
-                    f"allowing through"
+                    f"Uncertain spoof (conf={df_conf:.2f}) — "
+                    f"LBP={lbp_score:.1f}({'✓' if lbp_pass else '✗'})  "
+                    f"FFT={fft_score:.1f}({'✓' if fft_pass else '✗'})"
                 )
-        
+
         print(f"  [AntiSpoof-Decision] live={result['live']}  {result['reason']}")
+        print(f"  [DEBUG] LBP={lbp_score:.1f}  FFT={fft_score:.1f}")
     
     else:
         
         all_pass = lbp_pass and fft_pass
-        result["live"]   = all_pass
+        result["live"] = all_pass
         result["method"] = "texture+freq"
 
         if all_pass:
@@ -391,7 +381,11 @@ def _speak(text: str):
 
 def _sanitise(text: str) -> str:
     """Prevents CSV file corruption by encoding it to UTF-8"""
-    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+    text = text.encode("utf-8", errors="replace").decode("utf-8")
+    if text and text[0] in ('=', '+', '-', '@', '\t', '\r'):
+        text = "'" + text
+    return text
 
 
 def ensure_csvs():
@@ -621,7 +615,7 @@ def draw_hud(frame, enrolled_count: int):
 
     _, w = frame.shape[:2]
 
-    dt   = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
+    dt = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
 
     cv2.rectangle(frame, (0, 0), (w, 30), (20, 20, 20), -1)
     cv2.putText(frame, f"FaceGuard   |   {dt}   |   Enrolled: {enrolled_count}   |   Q = quit",
@@ -630,7 +624,6 @@ def draw_hud(frame, enrolled_count: int):
 # ── Background recognition worker ─────────────────────────────────────────────
 
 '''manages a dedicated background thread that runs independently of main loop'''
-
 
 class RecognitionWorker:
     def __init__(self):
@@ -677,14 +670,14 @@ class RecognitionWorker:
         """
         Detect face → run anti-spoof → run face recognition"""
 
-        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-        gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = _face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
 
         # Profile cascade check: if a side-face is visible but not a frontal face → Block immediately.
         if len(faces) == 0:
-            profile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_profileface.xml")
-            profiles = profile_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
+            profiles = _profile_cascade.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80)
+                )
 
             if len(profiles) > 0:
                 now = datetime.now()
@@ -731,11 +724,6 @@ class RecognitionWorker:
         color_crop = frame[y1:y2, x1:x2]
         gray_crop  = gray[y1:y2, x1:x2]
 
-        # DeepFace.find receives the full frame before embedding
-        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
-        os.close(tmp_fd)
-        cv2.imwrite(tmp_path, frame)
-
         now = datetime.now()
         ts  = time.time()
 
@@ -747,12 +735,12 @@ class RecognitionWorker:
                     liveness = check_liveness_passive(color_crop, gray_crop)
 
                 except Exception as e:
-                    print(f"  [AntiSpoof error] {e} — skipping liveness check")
+                    print(f"  [AntiSpoof error] {e}")
 
                     liveness = {
-                        "live": True,
+                        "live": False,
                         "method": "error",
-                        "reason": "check failed",
+                        "reason": "check failed - access denied",
                         "lbp": 0.0,
                         "fft": 0.0,
                         "deepface_real": None,"deepface_conf": 0.0
@@ -775,14 +763,14 @@ class RecognitionWorker:
                     }
 
             # ── Step 2: Face Recognition (if liveness passed) ───
-            matched  = False
-            emp_id   = ""
-            name     = ""
+            matched = False
+            emp_id = ""
+            name = ""
             distance = 1.0
-            top      = None
+            top = None
 
             results = DeepFace.find(
-                img_path = tmp_path,
+                img_path = frame,
                 db_path = DB_PATH,
                 model_name = MODEL_NAME,
                 detector_backend = DETECTOR,
@@ -812,12 +800,6 @@ class RecognitionWorker:
         except Exception as e:
             print(f"  [DeepFace error] {e}")
         
-        finally:
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
-
         # Build liveness info for status bar
         liveness_sub = ""
 
@@ -973,16 +955,7 @@ def run_attendance():
 # ── Enrollment ────────────────────────────────────────────────────────────────
 '''enrolling a new employee thorugh an saved image or through capture at checkpoint'''
 
-ENROLL_DUP_THRESHOLD = 0.25   # 1:N duplicate threshold
-
-# def _cosine_distance(a, b):
-#     """Cosine distance between two embedding vectors."""
-#     a, b = np.array(a), np.array(b)
-#     denom = (np.linalg.norm(a) * np.linalg.norm(b))
-#     if denom == 0:
-#         return 1.0
-#     return float(1 - np.dot(a, b) / denom)
-
+ENROLL_DUP_THRESHOLD = THRESHOLD   # 1:N duplicate threshold
 
 def _is_face_duplicate_1n(candidate_path: str) -> tuple:
     """Forced 1:N search to capture same person across different captures"""
@@ -1094,7 +1067,6 @@ def _enroll_from_webcam(dest_path: str, name: str):
         print("  Cannot open webcam.")
         return
 
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     print("  Press SPACE to capture  |  ESC to cancel")
 
     while True:
@@ -1105,17 +1077,41 @@ def _enroll_from_webcam(dest_path: str, name: str):
         frame = cv2.flip(frame, 1)
         display = frame.copy()
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(80, 80))
+        faces = _face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(80, 80))
 
         for (x, y, w, h) in faces:
             cv2.rectangle(display, (x, y), (x + w, y + h), (0, 220, 90), 2)
 
         color = (0, 220, 90) if len(faces) == 1 else (0, 140, 255)
-        cv2.putText(display, f"Enrolling: {name.replace('_', ' ')}", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+        cv2.putText(
+            display,
+            f"Enrolling: {name.replace('_', ' ')}",
+            (10, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 0),
+            2
+        )
 
-        cv2.putText(display, f"Faces detected: {len(faces)}", (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-        cv2.putText(display, "SPACE=capture  ESC=cancel", (10, display.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
+        cv2.putText(
+            display,
+            f"Faces detected: {len(faces)}",
+            (10, 56),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            color,
+            2
+        )
+        
+        cv2.putText(
+            display,
+            "SPACE=capture  ESC=cancel",
+            (10, display.shape[0] - 12),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 0, 0),
+            1
+        )
 
         cv2.imshow("Enroll Employee", display)
 
