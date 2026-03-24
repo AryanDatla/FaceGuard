@@ -211,7 +211,7 @@ def check_liveness_passive(color_crop: np.ndarray, gray_crop: np.ndarray) -> dic
 
     # ── Layer 0: Geometry gate (runs before any neural inference) ─────────
     # Rejects extreme-angle phone attacks that fool frontal-only models.
-
+    
     geo_ok, geo_reason = _check_face_geometry(color_crop)
 
     print(f"  [AntiSpoof] Geometry: {geo_reason}")
@@ -623,7 +623,7 @@ def draw_status_bar(frame, status: dict):
 
 def draw_hud(frame, enrolled_count: int):
     """Top-left corner info strip"""
-
+    
     _, w = frame.shape[:2]
 
     dt = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
@@ -682,12 +682,12 @@ class RecognitionWorker:
         Detect face → run anti-spoof → run face recognition"""
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = _face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
+        faces = _face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(50, 50))
 
         # Profile cascade check: if a side-face is visible but not a frontal face → Block immediately.
         if len(faces) == 0:
             profiles = _profile_cascade.detectMultiScale(
-                gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80)
+                gray, scaleFactor=1.1, minNeighbors=5, minSize=(50, 50)
                 )
 
             if len(profiles) > 0:
@@ -711,7 +711,7 @@ class RecognitionWorker:
                 print(f"  [AntiSpoof] BLOCKED — {reason}")
 
                 return {
-                    "text": "⚠  SPOOF DETECTED:  Presentation Attack",
+                    "text": "SPOOF DETECTED:  Presentation Attack",
                     "sub":  f"{reason}  |  {now.strftime('%H:%M:%S')}",
                     "matched": False, "spoof": True, "ts": ts,
                     "img_path": spoof_img, "liveness": liveness,
@@ -764,7 +764,7 @@ class RecognitionWorker:
                     print(f"  [AntiSpoof] BLOCKED — {liveness['reason']}")
 
                     return {
-                        "text": "⚠  SPOOF DETECTED:  Presentation Attack",
+                        "text": "SPOOF DETECTED:  Presentation Attack",
                         "sub":  f"{liveness['reason']}  |  {now.strftime('%H:%M:%S')}",
                         "matched": False,
                         "spoof": True,
@@ -1075,7 +1075,7 @@ def _enroll_from_webcam(dest_path: str, name: str, emp_id: str, num_photos: int 
         frame = cv2.flip(frame, 1)
         display = frame.copy()
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = _face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(80, 80))
+        faces = _face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(50, 50))
 
         for (x, y, w, h) in faces:
             cv2.rectangle(display, (x, y), (x + w, y + h), (0, 220, 90), 2)
